@@ -17,7 +17,8 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
 ]
 BASE_URL = "https://www.nseindia.com"
-TICKER_PATH = "E:/apps/Option_Chain_Analyser/tickers.csv"
+#TICKER_PATH = "E:/apps/Option_Chain_Analyser/tickers.csv"
+TICKER_PATH = os.path.join(os.getcwd(), "tickers.csv")
 ALERTS_FILE = "alerts.json"  # File to persist alerts
 
 # Utility Functions
