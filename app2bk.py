@@ -5,11 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import time
 import random
-import numpy as np
-from scipy.stats import norm
 from typing import Tuple, Optional, List, Dict
-import json
-import os
 
 # Constants
 USER_AGENTS = [
@@ -17,8 +13,7 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
 ]
 BASE_URL = "https://www.nseindia.com"
-TICKER_PATH = "E:/apps/Option_Chain_Analyser/tickers.csv"
-ALERTS_FILE = "alerts.json"  # File to persist alerts
+TICKER_PATH = "D:/apps/Options_chain_tool/tickers.csv"
 
 # Utility Functions
 def get_headers() -> Dict[str, str]:
@@ -116,106 +111,11 @@ def load_tickers() -> List[str]:
 def calculate_pcr(call_df: pd.DataFrame, put_df: pd.DataFrame) -> float:
     return put_df['OI'].sum() / call_df['OI'].sum() if call_df['OI'].sum() > 0 else 0
 
-def calculate_option_greeks(S: float, K: float, T: float, r: float, sigma: float, option_type: str = "call") -> Dict[str, float]:
-    if T <= 0 or sigma <= 0:
-        return {"Delta": 0, "Gamma": 0, "Theta": 0, "Vega": 0, "Rho": 0}
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    if option_type.lower() == "call":
-        delta = norm.cdf(d1)
-        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
-        rho = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
-    else:
-        delta = norm.cdf(d1) - 1
-        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
-        rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
-    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    vega = S * norm.pdf(d1) * np.sqrt(T) / 100
-    return {
-        "Delta": round(delta, 4),
-        "Gamma": round(gamma, 4),
-        "Theta": round(theta, 4),
-        "Vega": round(vega, 4),
-        "Rho": round(rho, 4)
-    }
-
-def identify_support_resistance(call_df: pd.DataFrame, put_df: pd.DataFrame, top_n: int = 3) -> Tuple[float, float]:
-    if not call_df.empty and call_df['OI'].sum() > 0 and call_df['Volume'].sum() > 0:
-        call_df['Weighted_Score'] = call_df['OI'] * call_df['Volume']
-        top_calls = call_df.nlargest(top_n, 'Weighted_Score')
-        resistance_strike = top_calls['Strike'].mean()
-    else:
-        resistance_strike = None
-    if not put_df.empty and put_df['OI'].sum() > 0 and put_df['Volume'].sum() > 0:
-        put_df['Weighted_Score'] = put_df['OI'] * put_df['Volume']
-        top_puts = put_df.nlargest(top_n, 'Weighted_Score')
-        support_strike = top_puts['Strike'].mean()
-    else:
-        support_strike = None
-    return support_strike, resistance_strike
-
-def check_alerts(alerts: List[Dict], underlying: float, call_df: pd.DataFrame, put_df: pd.DataFrame, 
-                 sold_strike: Optional[float], pcr: float) -> Tuple[List[str], List[int]]:
-    triggered_alerts = []
-    alerts_to_remove = []
-    for i, alert in enumerate(alerts):
-        alert_type = alert['type']
-        threshold = alert['threshold']
-        direction = alert['direction']
-        is_one_time = alert.get('one_time', False)
-        if alert_type == "Spot Price":
-            if direction == "Above" and underlying > threshold:
-                triggered_alerts.append(f"Spot Price Alert: Underlying ({underlying:.2f}) crossed above {threshold:.2f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-            elif direction == "Below" and underlying < threshold:
-                triggered_alerts.append(f"Spot Price Alert: Underlying ({underlying:.2f}) crossed below {threshold:.2f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-        elif alert_type == "OI Change" and sold_strike is not None:
-            oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
-            if direction == "Above" and oi_change > threshold:
-                triggered_alerts.append(f"OI Change Alert: OI Change ({oi_change:.0f}) at strike {sold_strike} exceeded {threshold:.0f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-            elif direction == "Below" and oi_change < threshold:
-                triggered_alerts.append(f"OI Change Alert: OI Change ({oi_change:.0f}) at strike {sold_strike} dropped below {threshold:.0f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-        elif alert_type == "PCR":
-            if direction == "Above" and pcr > threshold:
-                triggered_alerts.append(f"PCR Alert: PCR ({pcr:.2f}) exceeded {threshold:.2f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-            elif direction == "Below" and pcr < threshold:
-                triggered_alerts.append(f"PCR Alert: PCR ({pcr:.2f}) dropped below {threshold:.2f}")
-                if is_one_time:
-                    alerts_to_remove.append(i)
-    return triggered_alerts, alerts_to_remove
-
-def save_alerts(alerts: List[Dict]):
-    with open(ALERTS_FILE, 'w') as f:
-        json.dump(alerts, f)
-
-def load_alerts() -> List[Dict]:
-    if os.path.exists(ALERTS_FILE):
-        with open(ALERTS_FILE, 'r') as f:
-            return json.load(f)
-    return []
-
 # Main Application
 def main():
     st.set_page_config(page_title="Options Chain Analysis", layout="wide")
     st.title("Options Chain Analysis")
     
-    # Initialize Session State
-    if 'alerts' not in st.session_state:
-        st.session_state['alerts'] = load_alerts()
-    if 'triggered_alerts' not in st.session_state:
-        st.session_state['triggered_alerts'] = []
-    if 'last_alert_time' not in st.session_state:
-        st.session_state['last_alert_time'] = 0
-
     # Sidebar Configuration
     with st.sidebar:
         tickers = load_tickers()
@@ -233,44 +133,9 @@ def main():
         lot_size = st.number_input("Lot Size:", value=None, placeholder="Enter lot size")
         
         st.subheader("Adjustment Inputs")
-        risk_tolerance = st.number_input("Risk Tolerance (₹):", value=5000.0, step=1000.0)
+        risk_tolerance = st.number_input("Risk Tolerance (₹):", value=5000.0, step=1000.0,
+                                       help="Maximum loss you're willing to accept before taking action")
         oi_threshold = st.number_input("OI Change Threshold:", value=500.0, step=100.0)
-
-        st.subheader("Greeks Calculator Inputs")
-        implied_volatility = st.number_input("Implied Volatility (%):", value=30.0, step=1.0)
-        risk_free_rate = st.number_input("Risk-Free Rate (%):", value=5.0, step=0.1)
-        days_to_expiry = st.number_input("Days to Expiry:", value=30, step=1)
-
-        st.subheader("Support/Resistance Customization")
-        support_color = st.color_picker("Support Line Color:", value="#00FF00")
-        resistance_color = st.color_picker("Resistance Line Color:", value="#800080")
-
-        st.subheader("Alerts")
-        alert_type = st.selectbox("Alert Type:", ["Spot Price", "OI Change", "PCR"])
-        threshold = st.number_input("Threshold Value:", value=0.0, step=0.1)
-        direction = st.selectbox("Direction:", ["Above", "Below"])
-        one_time = st.checkbox("One-Time Alert", value=False, help="Remove alert after it triggers once")
-        
-        if st.button("Add Alert"):
-            alert = {
-                "type": alert_type,
-                "threshold": threshold,
-                "direction": direction,
-                "one_time": one_time
-            }
-            st.session_state['alerts'].append(alert)
-            save_alerts(st.session_state['alerts'])
-            st.success(f"Added Alert: {alert_type} {direction} {threshold}{' (One-Time)' if one_time else ''}")
-
-        if st.session_state['alerts']:
-            st.write("**Current Alerts:**")
-            for i, alert in enumerate(st.session_state['alerts']):
-                one_time_label = " (One-Time)" if alert.get('one_time', False) else ""
-                st.write(f"{i+1}. {alert['type']} {alert['direction']} {alert['threshold']}{one_time_label}")
-                if st.button(f"Delete Alert {i+1}", key=f"delete_alert_{i}"):
-                    st.session_state['alerts'].pop(i)
-                    save_alerts(st.session_state['alerts'])
-                    st.rerun()
 
     # Data Fetching and Processing
     st.session_state.setdefault('refresh_key', time.time())
@@ -285,40 +150,12 @@ def main():
     call_df, put_df = process_option_data(data, expiry)
     underlying = data['records'].get('underlyingValue', 812)
     max_pain = calculate_max_pain(call_df, put_df)
-    pcr = calculate_pcr(call_df, put_df)
 
-    support_strike, resistance_strike = identify_support_resistance(call_df, put_df, top_n=3)
-
-    triggered_alerts, alerts_to_remove = check_alerts(st.session_state['alerts'], underlying, call_df, put_df, sold_strike, pcr)
-    if triggered_alerts:
-        current_time = time.time()
-        if current_time - st.session_state['last_alert_time'] > 5:
-            st.session_state['triggered_alerts'].extend([alert for alert in triggered_alerts 
-                                                        if alert not in st.session_state['triggered_alerts']])
-            st.session_state['last_alert_time'] = current_time
-            audio_html = """
-            <audio autoplay>
-                <source src="https://www.soundjay.com/buttons/beep-01a.mp3" type="audio/mpeg">
-            </audio>
-            """
-            st.components.v1.html(audio_html, height=0)
-        if alerts_to_remove:
-            st.session_state['alerts'] = [alert for i, alert in enumerate(st.session_state['alerts']) 
-                                        if i not in alerts_to_remove]
-            save_alerts(st.session_state['alerts'])
-
-    if st.session_state['triggered_alerts']:
-        st.warning("**Alerts Triggered:**")
-        for alert_msg in st.session_state['triggered_alerts']:
-            st.write(f"- {alert_msg}")
-        if st.button("Clear Alerts"):
-            st.session_state['triggered_alerts'] = []
-            st.rerun()
-
+    # Main Display
     st.subheader(f"Underlying: {underlying:.2f}")
     st.metric("Max Pain Strike", f"{max_pain:.2f}")
     
-    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "Advanced Tools", "New Features", "Greeks Analysis"])
+    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "Advanced Tools", "New Features"])
     
     with tabs[0]:
         col1, col2 = st.columns(2)
@@ -332,13 +169,7 @@ def main():
                        labels={'x': 'Strike', 'value': 'OI'}, title=f"OI ({expiry})",
                        color_discrete_sequence=['#00CC96', '#EF553B'])
         fig_oi.for_each_trace(lambda t: t.update(name=['Call', 'Put'][int(t.name[-1])]))
-        fig_oi.add_vline(x=max_pain, line_dash="dash", line_color="red", annotation_text="Max Pain", annotation_position="top")
-        if support_strike is not None:
-            fig_oi.add_vline(x=support_strike, line_dash="dot", line_color=support_color, 
-                            annotation_text=f"Support ({support_strike:.2f})", annotation_position="top left")
-        if resistance_strike is not None:
-            fig_oi.add_vline(x=resistance_strike, line_dash="dot", line_color=resistance_color, 
-                            annotation_text=f"Resistance ({resistance_strike:.2f})", annotation_position="top right")
+        fig_oi.add_vline(x=max_pain, line_dash="dash", line_color="red")
         st.plotly_chart(fig_oi, use_container_width=True)
 
     with tabs[2]:
@@ -358,12 +189,14 @@ def main():
         st.plotly_chart(fig_price, use_container_width=True)
 
     with tabs[5]:
+        # OI Heatmap
         fig_heatmap = go.Figure(data=go.Heatmap(
             z=[call_df['OI'], put_df['OI']], x=call_df['Strike'], y=['Call', 'Put'],
             colorscale='Viridis'))
         fig_heatmap.update_layout(title=f'OI Heatmap ({expiry})')
         st.plotly_chart(fig_heatmap, use_container_width=True)
 
+        # P&L Simulator
         if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
             spots = range(int(call_df['Strike'].min()), int(call_df['Strike'].max()) + 1, 10)
             pl = [sold_premium * lot_size - max((spot - sold_strike), 0) * lot_size for spot in spots]
@@ -371,15 +204,19 @@ def main():
                            title=f'P&L: Sold {sold_strike} Call')
             fig_pl.add_vline(x=underlying, line_dash="dash", line_color="blue", annotation_text="Spot")
             fig_pl.add_vline(x=max_pain, line_dash="dash", line_color="red", annotation_text="Max Pain")
+            # Add current P&L as annotation
             current_pl = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
             fig_pl.add_annotation(x=underlying, y=current_pl, text=f"P&L: ₹{current_pl:,.2f}", showarrow=True, arrowhead=1)
             st.plotly_chart(fig_pl, use_container_width=True)
 
+        # Adjustment Table
         st.subheader("Adjustment Analysis")
         if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
             oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
             breakeven = sold_strike + sold_premium
+            # Calculate P&L: Positive value means profit, negative means loss
             pl_value = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
+            
             adjustments = pd.DataFrame({
                 'Metric': ['Spot', 'Max Pain', 'Breakeven', 'OI Change', 'Profit/Loss'],
                 'Value': [underlying, max_pain, breakeven, oi_change, pl_value],
@@ -402,31 +239,11 @@ def main():
         else:
             st.info("Enter P&L Simulator values to see adjustment analysis")
 
+        # PCR Analysis
         st.subheader("Put-Call Ratio (PCR) Analysis")
+        pcr = calculate_pcr(call_df, put_df)
         st.metric("PCR", f"{pcr:.2f}")
         st.write("PCR > 1: Bearish sentiment | PCR < 1: Bullish sentiment | PCR ≈ 1: Neutral")
-
-    with tabs[6]:
-        st.subheader("Greeks Analysis")
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
-            T = days_to_expiry / 365.0
-            sigma = implied_volatility / 100.0
-            r = risk_free_rate / 100.0
-            greeks = calculate_option_greeks(S=underlying, K=sold_strike, T=T, r=r, sigma=sigma, option_type="call")
-            greeks_df = pd.DataFrame({
-                "Greek": ["Delta", "Gamma", "Theta", "Vega", "Rho"],
-                "Value": [greeks["Delta"], greeks["Gamma"], greeks["Theta"], greeks["Vega"], greeks["Rho"]],
-                "Description": [
-                    "Rate of change of option price with respect to underlying price",
-                    "Rate of change of Delta with respect to underlying price",
-                    "Rate of change of option price with respect to time (per day)",
-                    "Rate of change of option price with respect to volatility (per 1% change)",
-                    "Rate of change of option price with respect to interest rate (per 1% change)"
-                ]
-            })
-            st.table(greeks_df)
-        else:
-            st.info("Enter P&L Simulator values to see Greeks analysis")
 
     if auto_refresh:
         time.sleep(30)
