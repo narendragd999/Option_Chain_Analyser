@@ -399,7 +399,7 @@ def main():
     st.subheader(f"Underlying: {underlying:.2f}")
     st.metric("Max Pain Strike", f"{max_pain:.2f}")
     
-    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "P&L Analysis", "P&L/Heatmap", "Greeks Analysis"])
+    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "Advanced Tools", "New Features", "Greeks Analysis"])
     
     with tabs[0]:
         col1, col2 = st.columns(2)
@@ -439,92 +439,6 @@ def main():
                          color_discrete_sequence=['#00CC96', '#EF553B'])
         fig_price.for_each_trace(lambda t: t.update(name=['Call', 'Put'][int(t.name[-1])]))
         st.plotly_chart(fig_price, use_container_width=True)
-
-    with tabs[4]:
-        st.subheader("Advanced Options Analysis")
-
-        # Check if P&L Simulator inputs are provided
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
-            # --- P&L Graph ---
-            st.subheader("P&L Analysis Across Spot Prices")
-            # Define the range of spot prices for the graph (e.g., ±500 from the sold strike)
-            spot_range = range(int(max(sold_strike - 500, call_df['Strike'].min())), 
-                              int(min(sold_strike + 500, call_df['Strike'].max()) + 1), 10)
-            # Calculate P&L for each spot price
-            pl_values = [sold_premium * lot_size - max((spot - sold_strike), 0) * lot_size for spot in spot_range]
-            # Create the P&L graph
-            fig_pl = px.line(x=spot_range, y=pl_values, labels={'x': 'Spot Price', 'y': 'P&L (₹)'},
-                            title=f'P&L: Sold {sold_strike} Call Option')
-            # Add vertical lines for key levels
-            fig_pl.add_vline(x=underlying, line_dash="dash", line_color="blue", 
-                            annotation_text=f"Spot ({underlying:.2f})", annotation_position="top")
-            fig_pl.add_vline(x=max_pain, line_dash="dash", line_color="red", 
-                            annotation_text=f"Max Pain ({max_pain:.2f})", annotation_position="top")
-            if support_strike is not None:
-                fig_pl.add_vline(x=support_strike, line_dash="dot", line_color=support_color, 
-                                annotation_text=f"Support ({support_strike:.2f})", annotation_position="top left")
-            if resistance_strike is not None:
-                fig_pl.add_vline(x=resistance_strike, line_dash="dot", line_color=resistance_color, 
-                                annotation_text=f"Resistance ({resistance_strike:.2f})", annotation_position="top right")
-            # Calculate breakeven and add a vertical line
-            breakeven = sold_strike + sold_premium
-            fig_pl.add_vline(x=breakeven, line_dash="dash", line_color="orange", 
-                            annotation_text=f"Breakeven ({breakeven:.2f})", annotation_position="top")
-            # Add current P&L as an annotation
-            current_pl = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
-            fig_pl.add_annotation(x=underlying, y=current_pl, text=f"Current P&L: ₹{current_pl:,.2f}", 
-                                 showarrow=True, arrowhead=1)
-            # Add horizontal line at P&L = 0
-            fig_pl.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="P&L = 0", 
-                            annotation_position="right")
-            st.plotly_chart(fig_pl, use_container_width=True)
-
-            # --- OI Change Table ---
-            st.subheader("OI Change Analysis for Nearby Strikes")
-            # Select strikes around the sold strike (e.g., ±2 strikes)
-            nearby_strikes = sorted(call_df['Strike'].values)
-            sold_strike_index = min(range(len(nearby_strikes)), key=lambda i: abs(nearby_strikes[i] - sold_strike))
-            start_index = max(0, sold_strike_index - 2)
-            end_index = min(len(nearby_strikes), sold_strike_index + 3)
-            selected_strikes = nearby_strikes[start_index:end_index]
-            # Filter call_df for selected strikes
-            oi_data = call_df[call_df['Strike'].isin(selected_strikes)][['Strike', 'OI', 'Change_in_OI']]
-            # Add a column to highlight the sold strike
-            oi_data['Highlight'] = oi_data['Strike'].apply(lambda x: "Sold Strike" if x == sold_strike else "")
-            # Add a column for OI Change interpretation
-            oi_data['OI Change Interpretation'] = oi_data['Change_in_OI'].apply(
-                lambda x: "Significant Increase" if x > oi_threshold else 
-                         "Significant Decrease" if x < -oi_threshold else "Stable"
-            )
-            st.table(oi_data.style.format({'Strike': '{:.2f}', 'OI': '{:.0f}', 'Change_in_OI': '{:.0f}'}))
-
-            # --- Adjustment Analysis Table ---
-            st.subheader("Adjustment Analysis for Sold Call")
-            oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
-            pl_value = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
-            
-            adjustments = pd.DataFrame({
-                'Metric': ['Spot', 'Max Pain', 'Breakeven', 'OI Change', 'Profit/Loss'],
-                'Value': [underlying, max_pain, breakeven, oi_change, pl_value],
-                'Action': [
-                    "Hold" if underlying < max_pain else "Hedge" if underlying > sold_strike else "Monitor",
-                    "Hold" if max_pain < sold_strike else "Monitor",
-                    "Exit" if underlying > breakeven else "Hold",
-                    "Exit" if abs(oi_change) > oi_threshold and oi_change > 0 else "Monitor" if abs(oi_change) > oi_threshold else "Hold",
-                    "Hedge" if pl_value < -risk_tolerance else "Hold"
-                ],
-                'Reason': [
-                    f"{'Below' if underlying < max_pain else 'Above' if underlying > sold_strike else 'Between'} key levels",
-                    f"Max Pain {'below' if max_pain < sold_strike else 'near/above'} strike",
-                    f"Spot {'above' if underlying > breakeven else 'below'} breakeven",
-                    f"OI {'↑' if oi_change > 0 else '↓'} {abs(oi_change):.0f}",
-                    f"{'Profit' if pl_value >= 0 else 'Loss'} ₹{abs(pl_value):,.0f} vs ₹{risk_tolerance:,.0f}"
-                ]
-            })
-            st.table(adjustments.style.format({'Value': '{:.2f}'}))
-
-        else:
-            st.info("Enter P&L Simulator values (Sold Call Strike, Sold Premium, Lot Size) to see advanced analysis.")    
 
     with tabs[5]:
         # OI Heatmap
