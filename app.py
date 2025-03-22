@@ -11,6 +11,10 @@ from typing import Tuple, Optional, List, Dict
 import json
 import os
 from streamlit.components.v1 import html
+import cloudscraper
+
+# Create a cloudscraper session
+scraper = cloudscraper.create_scraper()
 
 # Constants
 USER_AGENTS = [
@@ -18,38 +22,66 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
 ]
 BASE_URL = "https://www.nseindia.com"
-TICKER_PATH = "E:/apps/Option_Chain_Analyser/tickers.csv"
-ALERTS_FILE = "E:/apps/Option_Chain_Analyser/alerts.json"
+
+TICKER_PATH = "tickers.csv"
+ALERTS_FILE = "alerts.json"
+
+# Headers mimicking your browser
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/market-data/equity-derivatives-watch",
+}
+
+# Step 1: Visit the homepage to get initial cookies
+print("Visiting homepage...")
+response = scraper.get("https://www.nseindia.com/", headers=headers)
+if response.status_code != 200:
+    print(f"Failed to load homepage: {response.status_code}")
+    exit()
+
+# Step 2: Visit the derivatives page
+print("Visiting derivatives page...")
+scraper.get("https://www.nseindia.com/market-data/equity-derivatives-watch", headers=headers)
+time.sleep(2)
+
+
 
 # Utility Functions
-def get_headers() -> Dict[str, str]:
-    return {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': BASE_URL + "/"
-    }
+# def get_headers() -> Dict[str, str]:
+#     return {
+#         'User-Agent': random.choice(USER_AGENTS),
+#         'Accept': '*/*',
+#         'Accept-Language': 'en-US,en;q=0.9',
+#         'Referer': BASE_URL + "/"
+#     }
 
-def get_session() -> Optional[requests.Session]:
-    session = requests.Session()
-    try:
-        session.get(BASE_URL, headers=get_headers(), timeout=10)
-        return session
-    except requests.RequestException as e:
-        st.error(f"Session initialization failed: {e}")
-        return None
+# def get_session() -> Optional[requests.Session]:
+#     session = requests.Session()
+#     try:
+#         session.get(BASE_URL, headers=get_headers(), timeout=10)
+#         return session
+#     except requests.RequestException as e:
+#         st.error(f"Session initialization failed: {e}")
+#         return None
 
 def fetch_options_data(symbol: str, _refresh_key: float) -> Optional[Dict]:
+    # Step 3: Fetch the option chain data
+    #url = "https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
     url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
-    session = get_session()
-    if session:
-        try:
-            response = session.get(url, headers=get_headers(), timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            st.error(f"Data fetch failed for {symbol}: {e}")
-    return None
+    print(f"Fetching data from: {url}")
+    response = scraper.get(url, headers=headers)   
+
+    # Check response
+    if response.status_code == 200:
+        data = response.json()
+        print("Success! Data fetched:")
+        return response.json()
+    else:
+        print(f"Failed with status code: {response.status_code}")
+        print(f"Response text: {response.text}")
+        return None
 
 def process_option_data(data: Dict, expiry: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if not data or 'records' not in data or 'data' not in data['records']:
@@ -116,11 +148,14 @@ def load_tickers() -> List[str]:
 def calculate_pcr(call_df: pd.DataFrame, put_df: pd.DataFrame) -> float:
     return put_df['OI'].sum() / call_df['OI'].sum() if call_df['OI'].sum() > 0 else 0
 
+# Option Greeks Calculator using Black-Scholes Model
 def calculate_option_greeks(S: float, K: float, T: float, r: float, sigma: float, option_type: str = "call") -> Dict[str, float]:
     if T <= 0 or sigma <= 0:
         return {"Delta": 0, "Gamma": 0, "Theta": 0, "Vega": 0, "Rho": 0}
+
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
+
     if option_type.lower() == "call":
         delta = norm.cdf(d1)
         theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
@@ -129,8 +164,10 @@ def calculate_option_greeks(S: float, K: float, T: float, r: float, sigma: float
         delta = norm.cdf(d1) - 1
         theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
         rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
+
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     vega = S * norm.pdf(d1) * np.sqrt(T) / 100
+
     return {
         "Delta": round(delta, 4),
         "Gamma": round(gamma, 4),
@@ -146,12 +183,14 @@ def identify_support_resistance(call_df: pd.DataFrame, put_df: pd.DataFrame, top
         resistance_strike = top_calls['Strike'].mean()
     else:
         resistance_strike = None
+
     if not put_df.empty and put_df['OI'].sum() > 0 and put_df['Volume'].sum() > 0:
         put_df['Weighted_Score'] = put_df['OI'] * put_df['Volume']
         top_puts = put_df.nlargest(top_n, 'Weighted_Score')
         support_strike = top_puts['Strike'].mean()
     else:
         support_strike = None
+    
     return support_strike, resistance_strike
 
 def load_alerts() -> List[Dict]:
@@ -170,6 +209,9 @@ def play_alert_sound():
         <source src="https://www.soundjay.com/buttons/beep-01a.mp3" type="audio/mpeg">
         Your browser does not support the audio element.
     </audio>
+    <script>
+        document.getElementById('alertSound').play();
+    </script>
     """
     html(sound_script)
 
@@ -179,7 +221,9 @@ def check_alerts(alerts: List[Dict], current_ticker: str, underlying: float, cal
     
     for i, alert in enumerate(alerts):
         alert_ticker = alert.get('ticker', None)
-        if alert_ticker is None or alert_ticker != current_ticker:
+        if alert_ticker is None:
+            continue
+        if alert_ticker != current_ticker:
             continue
         
         alert_type = alert['type']
@@ -195,6 +239,7 @@ def check_alerts(alerts: List[Dict], current_ticker: str, underlying: float, cal
             elif direction == "Below" and underlying < threshold:
                 triggered_alerts.append(f"Spot Price Alert for {current_ticker}: Underlying ({underlying:.2f}) crossed below {threshold:.2f}")
                 triggered = True
+        
         elif alert_type == "OI Change" and sold_strike is not None:
             oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
             if direction == "Above" and oi_change > threshold:
@@ -203,6 +248,7 @@ def check_alerts(alerts: List[Dict], current_ticker: str, underlying: float, cal
             elif direction == "Below" and oi_change < threshold:
                 triggered_alerts.append(f"OI Change Alert for {current_ticker}: OI Change ({oi_change:.0f}) at strike {sold_strike} dropped below {threshold:.0f}")
                 triggered = True
+        
         elif alert_type == "PCR":
             if direction == "Above" and pcr > threshold:
                 triggered_alerts.append(f"PCR Alert for {current_ticker}: PCR ({pcr:.2f}) exceeded {threshold:.2f}")
@@ -216,22 +262,100 @@ def check_alerts(alerts: List[Dict], current_ticker: str, underlying: float, cal
     
     return triggered_alerts, alerts_to_remove
 
+# Modified Function for Call Selling Recommendations (Updated Reasons)
+def generate_call_selling_recommendations(call_df: pd.DataFrame, put_df: pd.DataFrame, underlying: float, max_pain: float, 
+                                         pcr: float, support_strike: float, resistance_strike: float, risk_tolerance: float, 
+                                         oi_threshold: float, days_to_expiry: float, implied_volatility: float, 
+                                         risk_free_rate: float, lot_size: float) -> Tuple[List[Dict], Dict]:
+    """
+    Generate call selling recommendations with additional metrics like Theta and Risk-Reward.
+    Returns a tuple of (recommendations list, top pick dictionary).
+    """
+    recommendations = []
+    strikes = call_df['Strike'].values
+    
+    # Filter out-of-the-money (OTM) calls (strike > underlying)
+    otm_calls = call_df[call_df['Strike'] > underlying].copy()
+    if otm_calls.empty:
+        return ([{"Strike": None, "Suggestion": "No OTM calls available", "Reason": "Underlying price exceeds all strikes"}], {})
+
+    # Calculate Greeks for each strike
+    T = days_to_expiry / 365.0
+    sigma = implied_volatility / 100.0
+    r = risk_free_rate / 100.0
+    
+    for strike in otm_calls['Strike']:
+        greeks = calculate_option_greeks(S=underlying, K=strike, T=T, r=r, sigma=sigma, option_type="call")
+        otm_calls.loc[otm_calls['Strike'] == strike, 'Theta'] = greeks['Theta']
+    
+    otm_calls['Premium'] = otm_calls['LTP']
+    
+    # Calculate additional metrics
+    otm_calls['Distance_from_Resistance'] = otm_calls['Strike'] - resistance_strike if resistance_strike else 0
+    otm_calls['Risk_Reward'] = np.where(
+        (otm_calls['Strike'] - underlying) > 0,
+        otm_calls['Premium'] / (otm_calls['Strike'] - underlying),
+        0
+    )
+    
+    # Generate recommendations
+    for index, row in otm_calls.iterrows():
+        strike = row['Strike']
+        premium = row['Premium']
+        oi = row['OI']
+        distance = row['Distance_from_Resistance']
+        theta = row['Theta']
+        risk_reward = row['Risk_Reward']
+        
+        # Determine suggestion and reason
+        if abs(row['Change_in_OI']) < oi_threshold and theta < -0.1 and oi > 2000:  # High OI and favorable Theta decay
+            suggestion = "Sell"
+            reason = "High OI and favorable Theta decay"
+        elif risk_reward > 0.2:  # Good risk-reward ratio
+            suggestion = "Sell"
+            reason = "Good risk-reward ratio"
+        else:
+            suggestion = "Monitor"
+            reason = "Neutral conditions"
+        
+        recommendations.append({
+            "Strike": strike,
+            "Premium": premium,
+            "OI": oi,
+            "Distance_from_Resistance": distance,
+            "Theta": theta,
+            "Risk_Reward": risk_reward,
+            "Suggestion": suggestion,
+            "Reason": reason,
+            "Lot_Size": lot_size
+        })
+    
+    # Sort recommendations by Theta (most negative first) and OI (highest first)
+    recommendations.sort(key=lambda x: (x['Theta'], -x['OI']))
+    
+    # Select top pick (best Theta and high OI)
+    top_pick = recommendations[0] if recommendations else {}
+    
+    return recommendations, top_pick
+
 # Main Application
 def main():
     st.set_page_config(page_title="Options Chain Analysis", layout="wide")
     st.title("Options Chain Analysis")
     
-    # Initialize Session State
+    # Initialize Session State for Alerts and P&L Inputs
     if 'alerts' not in st.session_state:
         st.session_state['alerts'] = load_alerts()
     if 'triggered_alerts' not in st.session_state:
         st.session_state['triggered_alerts'] = []
     if 'last_triggered_count' not in st.session_state:
         st.session_state['last_triggered_count'] = 0
-    if 'last_refresh_time' not in st.session_state:
-        st.session_state['last_refresh_time'] = time.time()
-    if 'refresh_key' not in st.session_state:
-        st.session_state['refresh_key'] = time.time()
+    if 'sold_strike' not in st.session_state:
+        st.session_state['sold_strike'] = None
+    if 'sold_premium' not in st.session_state:
+        st.session_state['sold_premium'] = None
+    if 'lot_size' not in st.session_state:
+        st.session_state['lot_size'] = 100.0  # Default value
 
     # Sidebar Configuration
     with st.sidebar:
@@ -241,24 +365,26 @@ def main():
         auto_refresh = st.checkbox("Auto-Refresh (30s)")
         if st.button("Refresh Now"):
             st.session_state['refresh_key'] = time.time()
-            st.session_state['last_refresh_time'] = time.time()
         
-        price_threshold = st.number_input("Price Change Threshold (%):", 0.0, value=200.0, step=10.0)
-        
-        st.subheader("P&L Simulator")
-        sold_strike = st.number_input("Sold Call Strike:", value=None, placeholder="Enter strike")
-        sold_premium = st.number_input("Sold Premium:", value=None, placeholder="Enter premium")
-        lot_size = st.number_input("Lot Size:", value=None, placeholder="Enter lot size")
-        
-        st.subheader("Adjustment Inputs")
+        st.subheader("Trade Parameters")
         risk_tolerance = st.number_input("Risk Tolerance (₹):", value=5000.0, step=1000.0,
                                        help="Maximum loss you're willing to accept before taking action")
+        st.session_state['lot_size'] = st.number_input("Lot Size:", value=st.session_state['lot_size'], step=1.0, key="lot_size_input")
+        
+        st.subheader("P&L Simulator")
+        st.session_state['sold_strike'] = st.number_input("Sold Call Strike:", value=st.session_state['sold_strike'], 
+                                                        placeholder="Enter strike", key="sold_strike_input")
+        st.session_state['sold_premium'] = st.number_input("Sold Premium:", value=st.session_state['sold_premium'], 
+                                                         placeholder="Enter premium", key="sold_premium_input")
+        #st.number_input("Lot Size:", value=st.session_state['lot_size'], key="lot_size_display")
+        
+        st.subheader("Adjustment Inputs")
         oi_threshold = st.number_input("OI Change Threshold:", value=500.0, step=100.0)
 
         st.subheader("Greeks Calculator Inputs")
-        implied_volatility = st.number_input("Implied Volatility (%):", value=30.0, step=1.0, help="Annualized implied volatility in percentage")
-        risk_free_rate = st.number_input("Risk-Free Rate (%):", value=5.0, step=0.1, help="Annualized risk-free interest rate in percentage")
-        days_to_expiry = st.number_input("Days to Expiry:", value=30, step=1, help="Number of days until option expiry")
+        implied_volatility = st.number_input("Implied Volatility (%):", value=30.0, step=1.0)
+        risk_free_rate = st.number_input("Risk-Free Rate (%):", value=5.0, step=0.1)
+        days_to_expiry = st.number_input("Days to Expiry:", value=30, step=1)
 
         st.subheader("Support/Resistance Customization")
         support_color = st.color_picker("Support Line Color:", value="#00FF00")
@@ -269,7 +395,7 @@ def main():
         alert_type = st.selectbox("Alert Type:", ["Spot Price", "OI Change", "PCR"])
         threshold = st.number_input("Threshold Value:", value=0.0, step=0.1)
         direction = st.selectbox("Direction:", ["Above", "Below"])
-        one_time = st.checkbox("One-Time Alert", value=False, help="Remove alert after it triggers")
+        one_time = st.checkbox("One-Time Alert", value=False)
         
         if st.button("Add Alert"):
             alert = {
@@ -294,6 +420,7 @@ def main():
                     st.rerun()
 
     # Data Fetching and Processing
+    st.session_state.setdefault('refresh_key', time.time())
     with st.spinner(f"Fetching data for {ticker}..."):
         data = fetch_options_data(ticker, st.session_state['refresh_key'])
     
@@ -303,14 +430,14 @@ def main():
     
     expiry = st.selectbox("Select Expiry:", data['records']['expiryDates'], index=0)
     call_df, put_df = process_option_data(data, expiry)
-    underlying = data['records'].get('underlyingValue', "")
+    underlying = data['records'].get('underlyingValue', 812)
     max_pain = calculate_max_pain(call_df, put_df)
     pcr = calculate_pcr(call_df, put_df)
-
     support_strike, resistance_strike = identify_support_resistance(call_df, put_df, top_n=3)
 
-    triggered_alerts, alerts_to_remove = check_alerts(st.session_state['alerts'], ticker, underlying, call_df, put_df, sold_strike, pcr)
-    
+    # Check Alerts
+    triggered_alerts, alerts_to_remove = check_alerts(st.session_state['alerts'], ticker, underlying, call_df, put_df, 
+                                                    st.session_state['sold_strike'], pcr)
     if alerts_to_remove:
         for index in sorted(alerts_to_remove, reverse=True):
             st.session_state['alerts'].pop(index)
@@ -332,10 +459,11 @@ def main():
             st.session_state['last_triggered_count'] = 0
             st.rerun()
 
+    # Main Display
     st.subheader(f"Underlying: {underlying:.2f}")
     st.metric("Max Pain Strike", f"{max_pain:.2f}")
     
-    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "P&L Analysis", "P&L/Heatmap", "Greeks Analysis"])
+    tabs = st.tabs(["Data", "OI Analysis", "Volume Analysis", "Price Analysis", "P&L Analysis", "P&L/Heatmap", "Greeks Analysis", "Trade Suggestions"])
     
     with tabs[0]:
         col1, col2 = st.columns(2)
@@ -376,41 +504,73 @@ def main():
 
     with tabs[4]:
         st.subheader("Advanced Options Analysis")
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
+        if all(x is not None for x in [st.session_state['sold_strike'], st.session_state['sold_premium'], st.session_state['lot_size']]):
             st.subheader("P&L Analysis Across Spot Prices")
-            spot_range = range(int(max(sold_strike - 500, call_df['Strike'].min())), 
-                              int(min(sold_strike + 500, call_df['Strike'].max()) + 1), 10)
-            pl_values = [sold_premium * lot_size - max((spot - sold_strike), 0) * lot_size for spot in spot_range]
+            spot_range = range(int(max(st.session_state['sold_strike'] - 500, call_df['Strike'].min())), 
+                              int(min(st.session_state['sold_strike'] + 500, call_df['Strike'].max()) + 1), 10)
+            pl_values = [st.session_state['sold_premium'] * st.session_state['lot_size'] - max((spot - st.session_state['sold_strike']), 0) * st.session_state['lot_size'] for spot in spot_range]
             fig_pl = px.line(x=spot_range, y=pl_values, labels={'x': 'Spot Price', 'y': 'P&L (₹)'},
-                            title=f'P&L: Sold {sold_strike} Call Option')
-            fig_pl.add_vline(x=underlying, line_dash="dash", line_color="blue", 
-                            annotation_text=f"Spot ({underlying:.2f})", annotation_position="top")
+                            title=f'P&L: Sold {st.session_state["sold_strike"]} Call Option')
+            
+            # Add vertical lines with non-overlapping annotations
+            # Base y position for annotations (top of the chart)
+            y_max = max(pl_values)
+            y_min = min(pl_values)
+            y_range = y_max - y_min
+            y_offset = y_range * 0.05  # 5% of the y-range for spacing between annotations
+            
+            # Add Max Pain line
             fig_pl.add_vline(x=max_pain, line_dash="dash", line_color="red", 
-                            annotation_text=f"Max Pain ({max_pain:.2f})", annotation_position="top")
+                            annotation_text=f"Max Pain ({max_pain:.2f})", 
+                            annotation_position="top",
+                            annotation=dict(y=y_max + y_offset * 3))  # Highest position
+            
+            # Add Spot line
+            fig_pl.add_vline(x=underlying, line_dash="dash", line_color="blue", 
+                            annotation_text=f"Spot ({underlying:.2f})", 
+                            annotation_position="top",
+                            annotation=dict(y=y_max + y_offset * 2))  # Second highest
+            
+            # Add Support line (if available)
             if support_strike is not None:
                 fig_pl.add_vline(x=support_strike, line_dash="dot", line_color=support_color, 
-                                annotation_text=f"Support ({support_strike:.2f})", annotation_position="top left")
+                                annotation_text=f"Support ({support_strike:.2f})", 
+                                annotation_position="top left",
+                                annotation=dict(y=y_max + y_offset))  # Third position
+            
+            # Add Resistance line (if available)
             if resistance_strike is not None:
                 fig_pl.add_vline(x=resistance_strike, line_dash="dot", line_color=resistance_color, 
-                                annotation_text=f"Resistance ({resistance_strike:.2f})", annotation_position="top right")
-            breakeven = sold_strike + sold_premium
+                                annotation_text=f"Resistance ({resistance_strike:.2f})", 
+                                annotation_position="top right",
+                                annotation=dict(y=y_max))  # Lowest of the top annotations
+            
+            # Add Breakeven line
+            breakeven = st.session_state['sold_strike'] + st.session_state['sold_premium']
             fig_pl.add_vline(x=breakeven, line_dash="dash", line_color="orange", 
-                            annotation_text=f"Breakeven ({breakeven:.2f})", annotation_position="top")
-            current_pl = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
+                            annotation_text=f"Breakeven ({breakeven:.2f})", 
+                            annotation_position="top",
+                            annotation=dict(y=y_max + y_offset * 4))  # Above Max Pain
+            
+            # Add Current P&L annotation
+            current_pl = st.session_state['sold_premium'] * st.session_state['lot_size'] - max((underlying - st.session_state['sold_strike']), 0) * st.session_state['lot_size']
             fig_pl.add_annotation(x=underlying, y=current_pl, text=f"Current P&L: ₹{current_pl:,.2f}", 
                                  showarrow=True, arrowhead=1)
+            
+            # Add P&L = 0 line
             fig_pl.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="P&L = 0", 
                             annotation_position="right")
+            
             st.plotly_chart(fig_pl, use_container_width=True)
 
             st.subheader("OI Change Analysis for Nearby Strikes")
             nearby_strikes = sorted(call_df['Strike'].values)
-            sold_strike_index = min(range(len(nearby_strikes)), key=lambda i: abs(nearby_strikes[i] - sold_strike))
+            sold_strike_index = min(range(len(nearby_strikes)), key=lambda i: abs(nearby_strikes[i] - st.session_state['sold_strike']))
             start_index = max(0, sold_strike_index - 2)
             end_index = min(len(nearby_strikes), sold_strike_index + 3)
             selected_strikes = nearby_strikes[start_index:end_index]
             oi_data = call_df[call_df['Strike'].isin(selected_strikes)][['Strike', 'OI', 'Change_in_OI']]
-            oi_data['Highlight'] = oi_data['Strike'].apply(lambda x: "Sold Strike" if x == sold_strike else "")
+            oi_data['Highlight'] = oi_data['Strike'].apply(lambda x: "Sold Strike" if x == st.session_state['sold_strike'] else "")
             oi_data['OI Change Interpretation'] = oi_data['Change_in_OI'].apply(
                 lambda x: "Significant Increase" if x > oi_threshold else 
                          "Significant Decrease" if x < -oi_threshold else "Stable"
@@ -418,22 +578,22 @@ def main():
             st.table(oi_data.style.format({'Strike': '{:.2f}', 'OI': '{:.0f}', 'Change_in_OI': '{:.0f}'}))
 
             st.subheader("Adjustment Analysis for Sold Call")
-            oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
-            pl_value = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
+            oi_change = call_df[call_df['Strike'] == st.session_state['sold_strike']]['Change_in_OI'].iloc[0] if st.session_state['sold_strike'] in call_df['Strike'].values else 0
+            pl_value = st.session_state['sold_premium'] * st.session_state['lot_size'] - max((underlying - st.session_state['sold_strike']), 0) * st.session_state['lot_size']
             
             adjustments = pd.DataFrame({
                 'Metric': ['Spot', 'Max Pain', 'Breakeven', 'OI Change', 'Profit/Loss'],
                 'Value': [underlying, max_pain, breakeven, oi_change, pl_value],
                 'Action': [
-                    "Hold" if underlying < max_pain else "Hedge" if underlying > sold_strike else "Monitor",
-                    "Hold" if max_pain < sold_strike else "Monitor",
+                    "Hold" if underlying < max_pain else "Hedge" if underlying > st.session_state['sold_strike'] else "Monitor",
+                    "Hold" if max_pain < st.session_state['sold_strike'] else "Monitor",
                     "Exit" if underlying > breakeven else "Hold",
                     "Exit" if abs(oi_change) > oi_threshold and oi_change > 0 else "Monitor" if abs(oi_change) > oi_threshold else "Hold",
                     "Hedge" if pl_value < -risk_tolerance else "Hold"
                 ],
                 'Reason': [
-                    f"{'Below' if underlying < max_pain else 'Above' if underlying > sold_strike else 'Between'} key levels",
-                    f"Max Pain {'below' if max_pain < sold_strike else 'near/above'} strike",
+                    f"{'Below' if underlying < max_pain else 'Above' if underlying > st.session_state['sold_strike'] else 'Between'} key levels",
+                    f"Max Pain {'below' if max_pain < st.session_state['sold_strike'] else 'near/above'} strike",
                     f"Spot {'above' if underlying > breakeven else 'below'} breakeven",
                     f"OI {'↑' if oi_change > 0 else '↓'} {abs(oi_change):.0f}",
                     f"{'Profit' if pl_value >= 0 else 'Loss'} ₹{abs(pl_value):,.0f} vs ₹{risk_tolerance:,.0f}"
@@ -442,7 +602,7 @@ def main():
             st.table(adjustments.style.format({'Value': '{:.2f}'}))
 
         else:
-            st.info("Enter P&L Simulator values (Sold Call Strike, Sold Premium, Lot Size) to see advanced analysis.")    
+            st.info("Enter P&L Simulator values to see advanced analysis.") 
 
     with tabs[5]:
         fig_heatmap = go.Figure(data=go.Heatmap(
@@ -451,42 +611,43 @@ def main():
         fig_heatmap.update_layout(title=f'OI Heatmap ({expiry})')
         st.plotly_chart(fig_heatmap, use_container_width=True)
 
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
+        if all(x is not None for x in [st.session_state['sold_strike'], st.session_state['sold_premium'], st.session_state['lot_size']]):
             spots = range(int(call_df['Strike'].min()), int(call_df['Strike'].max()) + 1, 10)
-            pl = [sold_premium * lot_size - max((spot - sold_strike), 0) * lot_size for spot in spots]
+            pl = [st.session_state['sold_premium'] * st.session_state['lot_size'] - max((spot - st.session_state['sold_strike']), 0) * st.session_state['lot_size'] for spot in spots]
             fig_pl = px.line(x=spots, y=pl, labels={'x': 'Spot', 'y': 'P&L (₹)'},
-                           title=f'P&L: Sold {sold_strike} Call')
+                           title=f'P&L: Sold {st.session_state["sold_strike"]} Call')
             fig_pl.add_vline(x=underlying, line_dash="dash", line_color="blue", annotation_text="Spot")
             fig_pl.add_vline(x=max_pain, line_dash="dash", line_color="red", annotation_text="Max Pain")
-            current_pl = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
+            current_pl = st.session_state['sold_premium'] * st.session_state['lot_size'] - max((underlying - st.session_state['sold_strike']), 0) * st.session_state['lot_size']
             fig_pl.add_annotation(x=underlying, y=current_pl, text=f"P&L: ₹{current_pl:,.2f}", showarrow=True, arrowhead=1)
             st.plotly_chart(fig_pl, use_container_width=True)
 
-        st.subheader("Adjustment Analysis")
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
-            oi_change = call_df[call_df['Strike'] == sold_strike]['Change_in_OI'].iloc[0] if sold_strike in call_df['Strike'].values else 0
-            breakeven = sold_strike + sold_premium
-            pl_value = sold_premium * lot_size - max((underlying - sold_strike), 0) * lot_size
+            st.subheader("Adjustment Analysis")
+            oi_change = call_df[call_df['Strike'] == st.session_state['sold_strike']]['Change_in_OI'].iloc[0] if st.session_state['sold_strike'] in call_df['Strike'].values else 0
+            breakeven = st.session_state['sold_strike'] + st.session_state['sold_premium']
+            pl_value = st.session_state['sold_premium'] * st.session_state['lot_size'] - max((underlying - st.session_state['sold_strike']), 0) * st.session_state['lot_size']
             
             adjustments = pd.DataFrame({
                 'Metric': ['Spot', 'Max Pain', 'Breakeven', 'OI Change', 'Profit/Loss'],
                 'Value': [underlying, max_pain, breakeven, oi_change, pl_value],
                 'Action': [
-                    "Hold" if underlying < max_pain else "Hedge" if underlying > sold_strike else "Monitor",
-                    "Hold" if max_pain < sold_strike else "Monitor",
+                    "Hold" if underlying < max_pain else "Hedge" if underlying > st.session_state['sold_strike'] else "Monitor",
+                    "Hold" if max_pain < st.session_state['sold_strike'] else "Monitor",
                     "Exit" if underlying > breakeven else "Hold",
                     "Exit" if abs(oi_change) > oi_threshold and oi_change > 0 else "Monitor" if abs(oi_change) > oi_threshold else "Hold",
                     "Hedge" if pl_value < -risk_tolerance else "Hold"
                 ],
                 'Reason': [
-                    f"{'Below' if underlying < max_pain else 'Above' if underlying > sold_strike else 'Between'} key levels",
-                    f"Max Pain {'below' if max_pain < sold_strike else 'near/above'} strike",
+                    f"{'Below' if underlying < max_pain else 'Above' if underlying > st.session_state['sold_strike'] else 'Between'} key levels",
+                    f"Max Pain {'below' if max_pain < st.session_state['sold_strike'] else 'near/above'} strike",
                     f"Spot {'above' if underlying > breakeven else 'below'} breakeven",
                     f"OI {'↑' if oi_change > 0 else '↓'} {abs(oi_change):.0f}",
                     f"{'Profit' if pl_value >= 0 else 'Loss'} ₹{abs(pl_value):,.0f} vs ₹{risk_tolerance:,.0f}"
                 ]
             })
             st.table(adjustments.style.format({'Value': '{:.2f}'}))
+        else:
+            st.info("Enter P&L Simulator values to see adjustment analysis")
 
         st.subheader("Put-Call Ratio (PCR) Analysis")
         st.metric("PCR", f"{pcr:.2f}")
@@ -494,13 +655,13 @@ def main():
 
     with tabs[6]:
         st.subheader("Greeks Analysis")
-        if all(x is not None for x in [sold_strike, sold_premium, lot_size]):
+        if all(x is not None for x in [st.session_state['sold_strike'], st.session_state['sold_premium'], st.session_state['lot_size']]):
             T = days_to_expiry / 365.0
             sigma = implied_volatility / 100.0
             r = risk_free_rate / 100.0
             greeks = calculate_option_greeks(
                 S=underlying,
-                K=sold_strike,
+                K=st.session_state['sold_strike'],
                 T=T,
                 r=r,
                 sigma=sigma,
@@ -521,13 +682,77 @@ def main():
         else:
             st.info("Enter P&L Simulator values to see Greeks analysis")
 
-    # Auto-Refresh Logic
+    # Trade Suggestions Tab with Call Selling Recommendations
+    with tabs[7]:
+        # Display key metrics at the top
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Underlying", f"{underlying:.2f}")
+        col2.metric("PCR", f"{pcr:.2f}")
+        col3.metric("Max Pain", f"{max_pain:.2f}")
+        col4.metric("Expiry", expiry)
+
+        #st.subheader("Call Selling Recommendations")
+        recommendations, top_pick = generate_call_selling_recommendations(
+            call_df, put_df, underlying, max_pain, pcr, support_strike, resistance_strike, 
+            risk_tolerance, oi_threshold, days_to_expiry, implied_volatility, risk_free_rate, 
+            st.session_state['lot_size']
+        )
+        
+        if recommendations[0]["Strike"] is None:
+            st.warning("No favorable call selling opportunities found.")
+        else:
+            # Create a DataFrame for the table
+            recommendations_df = pd.DataFrame(recommendations)
+            recommendations_df = recommendations_df[['Strike', 'Premium', 'OI', 'Distance_from_Resistance', 
+                                                    'Theta', 'Risk_Reward', 'Suggestion', 'Reason']]
+            
+            # Display the table with a border and header using st.table
+            st.write("### Recommendations Table")
+            # Use st.table with custom styling for borders and header
+            styled_df = recommendations_df.style.set_table_styles([
+                # {'selector': 'th', 'props': [('background-color', '#f0f0f0'), ('font-weight', 'bold'), ('border', '1px solid black')]},
+                # {'selector': 'td', 'props': [('border', '1px solid black')]},
+                # {'selector': 'table', 'props': [('border-collapse', 'collapse'), ('width', '100%')]}
+            ]).format({
+                'Strike': '{:.2f}',
+                'Premium': '{:.2f}',
+                'OI': '{:.0f}',
+                'Distance_from_Resistance': '{:.2f}',
+                'Theta': '{:.4f}',
+                'Risk_Reward': '{:.4f}'
+            })
+            st.table(styled_df)
+
+            # # Display the table with a button in each row
+            # for index, row in recommendations_df.iterrows():
+            #     cols = st.columns([1, 1, 1, 1, 1, 1, 1, 2, 1])
+            #     cols[0].write(f"{row['Strike']:.2f}")
+            #     cols[1].write(f"{row['Premium']:.2f}")
+            #     cols[2].write(f"{row['OI']:.0f}")
+            #     cols[3].write(f"{row['Distance_from_Resistance']:.2f}")
+            #     cols[4].write(f"{row['Theta']:.4f}")
+            #     cols[5].write(f"{row['Risk_Reward']:.4f}")
+            #     cols[6].write(row['Suggestion'])
+            #     cols[7].write(row['Reason'])
+            #     if cols[8].button("Select", key=f"select_trade_{index}"):
+            #         st.session_state['sold_strike'] = row['Strike']
+            #         st.session_state['sold_premium'] = row['Premium']
+            #         # Lot size is not updated here; it remains manually entered
+            #         st.rerun()
+
+            # Display Top Pick with green background
+            if top_pick:
+                st.markdown(
+                    f"<div style='background-color: #d4edda; padding: 10px; border-radius: 5px;'>"
+                    f"<b>Top Pick:</b> Sell {top_pick['Strike']} Call @ ₹{top_pick['Premium']:.2f} | <b>Reason:</b> {top_pick['Reason']}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
     if auto_refresh:
-        current_time = time.time()
-        if current_time - st.session_state['last_refresh_time'] >= 30:
-            st.session_state['refresh_key'] = time.time()
-            st.session_state['last_refresh_time'] = current_time
-            st.rerun()
+        time.sleep(30)
+        st.session_state['refresh_key'] = time.time()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
