@@ -1,1 +1,1 @@
-[]
+[{"ticker": "HDFCBANK", "type": "Spot Price", "threshold": 1.0, "direction": "Below", "one_time": true}, {"ticker": "HDFCBANK", "type": "Spot Price", "threshold": 0.5000000000000001, "direction": "Below", "one_time": true}, {"ticker": "BAJFINANCE", "type": "Spot Price", "threshold": 0.5000000000000001, "direction": "Below", "one_time": true}]
